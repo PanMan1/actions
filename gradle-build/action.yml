@@ -1,0 +1,211 @@
+name: 'gradle-build'
+description: 'Builds the application using Gradle wrapper'
+inputs:
+  java-version:
+    required: false
+    description: Java version to use. Defaults to latest LTS JDK
+    default: "17"
+  github-token-private-repo:
+    required: true
+    description: Token to read github packages
+  containerize:
+    required: false
+    description: Should containerize & push to registry or not
+    default: "false"
+  use-common-dockerfile:
+    required: false
+    description: Whether to use common dockerfile managed by platform or use your own
+    default: "true"
+  service-path:
+    required: false
+    description: The path to the main project supposed to be checked
+    default: "."
+  release-artifacts:
+    required: false
+    description: Whether to release artifacts when running on master
+    default: 'false'
+  release-artifacts-command:
+    required: false
+    description: Command used to release the artifacts
+    default: ':api:build :api:release'
+  publish-test-results:
+    required: false
+    description: Should publish test results or not
+    default: "true"
+  skip-command:
+    required: false
+    description: Skip task from gradle build command
+    default: ''
+  source-ref:
+    required: false
+    description: The branch, tag or SHA to checkout. When checking out the repository that triggered a workflow, this defaults to the reference or SHA for that event. Otherwise, uses the default branch.
+    default: ''
+  openapi-generate-spec:
+    description: Generates a new openapi spec, commits and pushes it if needed
+    required: false
+    default: "false"
+  openapi-spec-path:
+    required: false
+    description: Path relative to working directory (project root) to a OpenAPI specification file
+    default: 'client/src/main/resources/spec.json'
+  openapi-spec-client-build-command:
+    required: false
+    description: Command used to build a client
+    default: ':Client:build'
+outputs:
+  build-number:
+    description: Generated build number using commit time & hash
+    value: ${{ steps.set-build-number.outputs.build-number }}
+runs:
+  using: "composite"
+  steps:
+    - uses: actions/checkout@v4 # checkout service repo
+      with:
+        path: ${{ github.event.repository.name }}
+        token: ${{ inputs.github-token-private-repo }}
+        ref: ${{ inputs.source-ref }}
+
+    - name: Set build number
+      id: set-build-number
+      uses: actions/build-number@master
+
+    - name: Set up Java
+      uses: actions/setup-java@v4
+      with:
+        java-version: ${{ inputs.java-version }}
+        distribution: temurin
+
+    # Setup cache
+    - name: Use gradle cache
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.gradle/caches
+          ~/.gradle/wrapper
+        key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+        restore-keys: ${{ runner.os }}-gradle-
+
+    # Build
+    - name: Build with Gradle
+      shell: bash
+      id: gradle-task
+      env:
+        JAVA_OPTS: '-Xmx2G'
+      run: |
+        GRADLE_OUTPUT=0
+        set +e # Disable fail-fast - https://github.com/actions/runner/blob/main/docs/adrs/0277-run-action-shell-options.md
+        ./gradlew clean build checkLicense ${{ inputs.skip-command }} \
+        -PgithubUser=${{ github.actor }} \
+        -PgithubPassword=${{ github.token }} \
+        -PgithubReadOtherPackagesToken=${{ inputs.github-token-private-repo }} || GRADLE_OUTPUT=$?
+
+        echo "Gradle task status = '$GRADLE_OUTPUT'"
+        echo "build-output=$GRADLE_OUTPUT" >> $GITHUB_OUTPUT
+      working-directory: ${{ github.event.repository.name }}
+
+    - name: Configure git
+      if: inputs.release-artifacts == 'true' || inputs.openapi-generate-spec == 'true'
+      shell: bash
+      run: |
+        git pull --unshallow
+        git config user.name "Denis Nikolaev" && git config user.email "dl.nikolaev1996@gmail.com"
+      working-directory: ${{ github.event.repository.name }}
+
+    - name: Check OpenAPI specification
+      if: inputs.openapi-generate-spec == 'true'
+      shell: bash
+      run: |
+        git add ${{ inputs.openapi-spec-path }}
+        git_diff_result=$(git diff-index --quiet HEAD --; echo $?)
+        [[ git_diff_result -eq 1 ]] && OPEN_API_WAS_CHANGED=true || OPEN_API_WAS_CHANGED=false
+        echo "OPEN_API_WAS_CHANGED=$OPEN_API_WAS_CHANGED" >> $GITHUB_ENV
+        echo "OpenAPI specification was changed - $OPEN_API_WAS_CHANGED"
+      working-directory: ${{ github.event.repository.name }}
+
+    - name: Build Client
+      if: inputs.openapi-generate-spec == 'true' && env.OPEN_API_WAS_CHANGED == 'true'
+      shell: bash
+      env:
+        JAVA_OPTS: '-Xmx2G'
+      run: |
+        GRADLE_OUTPUT=0
+        set +e # Disable fail-fast - https://github.com/actions/runner/blob/main/docs/adrs/0277-run-action-shell-options.md
+        ./gradlew ${{ inputs.openapi-spec-client-build-command }}  \
+        -PgithubUser=${{ github.actor }} \
+        -PgithubPassword=${{ github.token }} \
+        -PgithubReadOtherPackagesToken=${{ inputs.github-token-private-repo }} || GRADLE_OUTPUT=$?
+      working-directory: ${{ github.event.repository.name }}
+
+    - name: Commit OpenAPI spec
+      if: inputs.openapi-generate-spec == 'true' && env.OPEN_API_WAS_CHANGED == 'true'
+      shell: bash
+      run: |
+        git config user.name "Denis Nikolaev" && git config user.email "dl.nikolaev1996@gmail.com"
+        git commit -m "API was changed. New OpenApi specification created"
+        git push origin HEAD
+      working-directory: ${{ github.event.repository.name }}
+
+    - name: Release artifacts
+      if: inputs.release-artifacts == 'true'
+      shell: bash
+      run: >-
+        ./gradlew ${{ inputs.release-artifacts-command }}
+        -Prelease.useAutomaticVersion=true
+        -PgithubUser=${{ github.actor }}
+        -PgithubPassword=${{ github.token }}
+        -PgithubReadOtherPackagesToken=${{ inputs.github-token-private-repo }}
+      working-directory: ${{ github.event.repository.name }}
+
+    # Publish test results if enabled
+    - name: Publish Test Results
+      if: inputs.publish-test-results == 'true'
+      uses: EnricoMi/publish-unit-test-result-action@v2.6.2
+      with:
+        check_name: "Test Results"
+        large_files: true
+        junit_files: ${{ github.event.repository.name }}/**/build/test-results/test/TEST-*.xml
+
+    - name: Compress Test Report
+      if: inputs.publish-test-results == 'true'
+      shell: bash
+      run: |
+        [ -d ${{ github.event.repository.name }}/build/reports/tests ] \
+          && zip -r ${{ github.event.repository.name }}/build/junit.zip ${{ github.event.repository.name }}/build/reports/tests/* \
+          || echo "junit reports directory not present"
+        [ -d ${{ github.event.repository.name }}/build/reports/jacoco/test/html ] \
+          && zip -r ${{ github.event.repository.name }}/build/jacoco.zip ${{ github.event.repository.name }}/build/reports/jacoco/test/html/* \
+          || echo "jacoco directory not present"
+
+    - name: Upload Test Report
+      if: inputs.publish-test-results == 'true'
+      uses: actions/upload-artifact@v4
+      with:
+        name: Gradle JUnit Reports
+        path: |
+          ${{ github.event.repository.name }}/build/junit.zip
+          ${{ github.event.repository.name }}/build/jacoco.zip
+        retention-days: 1
+
+    # Remove Cache
+    - name: Cleanup Gradle Cache
+      shell: bash
+      run: |
+        rm -f ~/.gradle/caches/modules-2/modules-2.lock
+        rm -f ~/.gradle/caches/modules-2/gc.properties
+
+    - name: Check gradle status after test artifacts are uploaded
+      shell: bash
+      run: |
+        GRADLE_OUTPUT=${{ steps.gradle-task.outputs.build-output }}
+        echo "Gradle task status = '$GRADLE_OUTPUT'"
+        exit $GRADLE_OUTPUT
+
+    - name: Build the Docker image
+      if: inputs.containerize == 'true'
+      # https://github.com/moby/moby/issues/37965
+      run: ${{ github.action_path }}/docker-build.sh ${{ inputs.use-common-dockerfile }} ${{ inputs.java-version }} ${{ inputs.service-path }}
+      shell: bash
+      working-directory: ${{ github.event.repository.name }}
+
+    - uses: jwalton/gh-find-current-pr@v1
+      id: finder

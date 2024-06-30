@@ -1,0 +1,23 @@
+name: 'build-number'
+description: 'Generate build number and set GITHUB_ENV'
+inputs:
+  working-directory:
+    required: false
+    description: Github working directory
+    default: ${{ github.event.repository.name }}
+outputs:
+  build-number:
+    description: Generated build number using commit time & hash
+    value: ${{ steps.build-number.outputs.build-number }}
+runs:
+  using: "composite"
+  steps:
+    - name: build number
+      id: build-number
+      working-directory: ${{ inputs.working-directory }}
+      shell: bash
+      run: |
+        BUILD_NUMBER="$(TZ=UTC0 git --no-pager show -s --date=format-local:'%Y%m%d-%H%M%S' --format=%cd)-$(git rev-parse --short HEAD)"
+        echo "BUILD_NUMBER=$BUILD_NUMBER" >> $GITHUB_ENV
+        echo "build-number=$BUILD_NUMBER" >> $GITHUB_OUTPUT
+        echo "Generated '$BUILD_NUMBER' for '${{ github.event.repository.name }}' by '${{ github.actor }}'"
