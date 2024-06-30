@@ -67,7 +67,7 @@ runs:
 
     - name: Set build number
       id: set-build-number
-      uses: actions/build-number@master
+      uses: PanMan1/actions/build-number@master
 
     - name: Set up Java
       uses: actions/setup-java@v4
