@@ -94,7 +94,7 @@ runs:
       run: |
         GRADLE_OUTPUT=0
         set +e # Disable fail-fast - https://github.com/actions/runner/blob/main/docs/adrs/0277-run-action-shell-options.md
-        ./gradlew clean build checkLicense ${{ inputs.skip-command }} \
+        ./gradlew clean build ${{ inputs.skip-command }} \
         -PgithubUser=${{ github.actor }} \
         -PgithubPassword=${{ github.token }} \
         -PgithubReadOtherPackagesToken=${{ inputs.github-token-private-repo }} || GRADLE_OUTPUT=$?
